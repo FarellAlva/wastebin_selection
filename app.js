@@ -122,10 +122,17 @@ const DOM = {
   connStateLabel: document.getElementById('conn-state-label'),
   specPortName: document.getElementById('spec-port-name'),
 
-  // Servo Control
+  // Servo Control & Speedometer
   servoAngleText: document.getElementById('servo-angle-text'),
   servoNeedle: document.getElementById('servo-needle'),
   servoDirectionText: document.getElementById('servo-direction-text'),
+  servoSpeedometerWrapper: document.getElementById('servo-speedometer-wrapper'),
+  speedoTelemetryStatus: document.getElementById('speedo-telemetry-status'),
+  speedoTelemetryTarget: document.getElementById('speedo-telemetry-target'),
+  marker30Deg: document.getElementById('marker-30-deg'),
+  marker90Deg: document.getElementById('marker-90-deg'),
+  marker150Deg: document.getElementById('marker-150-deg'),
+  confTrackFill: document.getElementById('conf-track-fill'),
   btnManualDry: document.getElementById('btn-manual-dry'),
   btnManualReset: document.getElementById('btn-manual-reset'),
   btnManualWet: document.getElementById('btn-manual-wet'),
@@ -582,6 +589,14 @@ function updatePrimaryDisplay(cat, confidence, subText) {
   const pctStr = (confidence * 100).toFixed(1) + "%";
   DOM.primaryConfidencePct.textContent = pctStr;
 
+  // Update Radial Speedometer Confidence Arc (circumference = 2 * PI * 44 ≈ 276.46)
+  if (DOM.confTrackFill) {
+    const circumference = 276.46;
+    const clampConf = Math.max(0, Math.min(1, confidence || 0));
+    const offset = circumference - (circumference * clampConf);
+    DOM.confTrackFill.style.strokeDashoffset = offset;
+  }
+
   if (cat && (cat.type === "DRY" || cat.type === "WET")) {
     DOM.primaryCategoryName.textContent = cat.displayName;
     DOM.primaryCategorySub.textContent = subText || cat.subDesc;
@@ -605,6 +620,11 @@ function resetClassificationDisplay() {
   DOM.stabilityCount.textContent = "0 / 6 Frame";
   DOM.stabilityBar.style.width = "0%";
   DOM.targetBox.className = "target-box";
+
+  // Reset Radial Speedometer Confidence Arc
+  if (DOM.confTrackFill) {
+    DOM.confTrackFill.style.strokeDashoffset = 276.46;
+  }
 }
 
 function showToast(text, icon = 'ℹ️') {
@@ -771,18 +791,46 @@ class SerialManager {
 class ServoController {
   /**
    * Update visual gauge needle and labels
-   * Needle SVG transform formula: (targetAngle - 90) deg
+   * Precision Speedometer with pivot at (170, 170)
+   * Formula: rotationDeg = (targetAngle - 90)
    */
   static updateVisualAngle(angle, directionDescription) {
     AppState.currentServoAngle = angle;
-    DOM.servoAngleText.textContent = `${angle}°`;
+    if (DOM.servoAngleText) DOM.servoAngleText.textContent = `${angle}°`;
 
     // SVG Needle Rotation: 90 deg = 0deg rotate.
-    // 30 deg = -60deg rotate. 150 deg = +60deg rotate.
+    // 30 deg = -60deg rotate (pointing left-up to 30° mark).
+    // 150 deg = +60deg rotate (pointing right-up to 150° mark).
     const rotationDeg = angle - 90;
-    DOM.servoNeedle.setAttribute('transform', `rotate(${rotationDeg}, 150, 150)`);
 
-    if (directionDescription) {
+    if (DOM.servoNeedle) {
+      DOM.servoNeedle.style.transform = `rotate(${rotationDeg}deg)`;
+      DOM.servoNeedle.setAttribute('transform', `rotate(${rotationDeg}, 170, 170)`);
+    }
+
+    // Telemetry updates
+    if (DOM.speedoTelemetryStatus) {
+      DOM.speedoTelemetryStatus.textContent = (angle === CONFIG.ANGLES.RESET) ? "STANDBY" : "MEMILAH";
+    }
+
+    if (DOM.speedoTelemetryTarget) {
+      if (angle === CONFIG.ANGLES.DRY) DOM.speedoTelemetryTarget.textContent = "KIRI (DRY)";
+      else if (angle === CONFIG.ANGLES.WET) DOM.speedoTelemetryTarget.textContent = "KANAN (WET)";
+      else DOM.speedoTelemetryTarget.textContent = "NETRAL (90°)";
+    }
+
+    // Highlight Speedometer Zone
+    if (DOM.servoSpeedometerWrapper) {
+      if (angle === CONFIG.ANGLES.DRY) {
+        DOM.servoSpeedometerWrapper.className = "servo-gauge-wrapper at-dry";
+      } else if (angle === CONFIG.ANGLES.WET) {
+        DOM.servoSpeedometerWrapper.className = "servo-gauge-wrapper at-wet";
+      } else {
+        DOM.servoSpeedometerWrapper.className = "servo-gauge-wrapper at-neutral";
+      }
+    }
+
+    if (directionDescription && DOM.servoDirectionText) {
       DOM.servoDirectionText.textContent = `Arah: ${directionDescription}`;
     }
   }
@@ -936,6 +984,17 @@ function initEventListeners() {
   DOM.btnManualDry.addEventListener('click', () => ServoController.sendManualCommand("DRY"));
   DOM.btnManualReset.addEventListener('click', () => ServoController.sendManualCommand("RESET"));
   DOM.btnManualWet.addEventListener('click', () => ServoController.sendManualCommand("WET"));
+
+  // Interactive Speedometer Dial Markers
+  if (DOM.marker30Deg) {
+    DOM.marker30Deg.addEventListener('click', () => ServoController.sendManualCommand("DRY"));
+  }
+  if (DOM.marker90Deg) {
+    DOM.marker90Deg.addEventListener('click', () => ServoController.sendManualCommand("RESET"));
+  }
+  if (DOM.marker150Deg) {
+    DOM.marker150Deg.addEventListener('click', () => ServoController.sendManualCommand("WET"));
+  }
 
   // Terminal & History
   DOM.btnClearLog.addEventListener('click', () => {
