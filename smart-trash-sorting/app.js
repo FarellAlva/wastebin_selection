@@ -124,6 +124,7 @@ const DOM = {
 
   // Servo Control & Speedometer
   servoAngleText: document.getElementById('servo-angle-text'),
+  servoAngleHeaderText: document.getElementById('servo-angle-header-text'),
   servoNeedle: document.getElementById('servo-needle'),
   servoDirectionText: document.getElementById('servo-direction-text'),
   servoSpeedometerWrapper: document.getElementById('servo-speedometer-wrapper'),
@@ -722,20 +723,19 @@ class SerialManager {
 
   /**
    * Send ASCII command string to ESP32
+   * Uses direct writer + Uint8Array encoding to prevent locking or closing stream
    */
   static async write(commandString) {
     if (!AppState.isSerialConnected || !AppState.serialPort || !AppState.serialPort.writable) {
+      logTerminal(`Gagal kirim '${commandString.trim()}': ESP32 belum terhubung!`, 'warn');
       return false;
     }
 
     try {
-      const textEncoder = new TextEncoderStream();
-      const writableStreamClosed = textEncoder.readable.pipeTo(AppState.serialPort.writable);
-      const writer = textEncoder.writable.getWriter();
-
-      await writer.write(commandString);
+      const writer = AppState.serialPort.writable.getWriter();
+      const encoder = new TextEncoder();
+      await writer.write(encoder.encode(commandString));
       writer.releaseLock();
-      await writableStreamClosed.catch(() => {}); // catch close
 
       logTerminal(`[TX -> ESP32]: ${commandString.trim()}`, 'sent');
       return true;
@@ -764,20 +764,24 @@ class SerialManager {
           if (value) {
             lineBuffer += value;
             const lines = lineBuffer.split(/\r?\n/);
-            // Simpan sisa string yang belum memiliki newline
-            lineBuffer = lines.pop();
+            lineBuffer = lines.pop(); // simpan sisa karakter
 
             for (const line of lines) {
               const trimmed = line.trim();
               if (trimmed.length > 0) {
                 logTerminal(`[RX <- ESP32]: ${trimmed}`, 'recv');
+
+                // Sinkronisasi: Saat ESP32 melapor selesai memilah, kembalikan jarum ke 90°
+                if (trimmed.includes("Kembali ke Netral") || trimmed.includes("Posisi netral") || trimmed.includes("posisi netral")) {
+                  ServoController.updateVisualAngle(CONFIG.ANGLES.RESET, "Standby Netral (90°)");
+                }
               }
             }
           }
         }
       } catch (err) {
         if (AppState.keepReadingSerial) {
-          logTerminal(`Error membaca serial: ${err.message}`, 'err');
+          logTerminal(`Info Serial: ${err.message}`, 'info');
         }
         break;
       }
@@ -786,9 +790,11 @@ class SerialManager {
 }
 
 // ============================================================================
-// Servo Controller (Visual & Manual Dispatch)
+// Servo Controller (Visual Speedometer & Command Dispatch)
 // ============================================================================
 class ServoController {
+  static manualResetTimer = null;
+
   /**
    * Update visual gauge needle and labels
    * Precision Speedometer with pivot at (170, 170)
@@ -796,7 +802,10 @@ class ServoController {
    */
   static updateVisualAngle(angle, directionDescription) {
     AppState.currentServoAngle = angle;
+
+    // Update both angle readouts (header badge & speedometer digital HUD)
     if (DOM.servoAngleText) DOM.servoAngleText.textContent = `${angle}°`;
+    if (DOM.servoAngleHeaderText) DOM.servoAngleHeaderText.textContent = `${angle}°`;
 
     // SVG Needle Rotation: 90 deg = 0deg rotate.
     // 30 deg = -60deg rotate (pointing left-up to 30° mark).
@@ -804,6 +813,8 @@ class ServoController {
     const rotationDeg = angle - 90;
 
     if (DOM.servoNeedle) {
+      DOM.servoNeedle.style.transformBox = 'view-box';
+      DOM.servoNeedle.style.transformOrigin = '170px 170px';
       DOM.servoNeedle.style.transform = `rotate(${rotationDeg}deg)`;
       DOM.servoNeedle.setAttribute('transform', `rotate(${rotationDeg}, 170, 170)`);
     }
@@ -879,6 +890,14 @@ class ServoController {
       angle: `${angle}°`,
       status: sendStatus
     });
+
+    // Otomatis kembalikan jarum ke 90° setelah 2.5 detik (sinkron dengan firmware ESP32)
+    if (type === "DRY" || type === "WET") {
+      clearTimeout(ServoController.manualResetTimer);
+      ServoController.manualResetTimer = setTimeout(() => {
+        ServoController.updateVisualAngle(CONFIG.ANGLES.RESET, "Standby Netral (90°)");
+      }, 2500);
+    }
   }
 }
 
