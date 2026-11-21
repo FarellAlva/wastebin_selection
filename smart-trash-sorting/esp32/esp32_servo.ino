@@ -2,66 +2,53 @@
  * ============================================================================
  * Smart Trash Sorting System - ESP32 Firmware (DUAL MODE: USB + BLUETOOTH)
  * ============================================================================
- * Board           : ESP32 Dev Module / NodeMCU-32S
+ * Board           : ESP32 Dev Module
+ * Partition Scheme: Huge APP (3MB No OTA / 1MB SPIFFS) -> Wajib untuk Bluetooth!
  * Library Wajib   : ESP32Servo by Kevin Harrington (Install via Arduino Library Manager)
- * Library Bawaan  : BluetoothSerial (Sudah bawaan core ESP32)
+ * Library Bawaan  : BluetoothSerial (Bawaan ESP32)
  *
- * FITUR DUAL MODE:
- * 1. USB Serial      : Baud rate 115200 bps (pakai kabel USB)
- * 2. Wireless BT     : Bluetooth Classic SPP dengan nama "SmartTrash_ESP32"
- *                      -> ESP32 tidak perlu colok kabel ke laptop!
- *                      -> Cukup colok ke power bank / adaptor 5V di tempat sampah.
- *
- * PENGATURAN ARDUINO IDE SEBELUM UPLOAD:
- * - Board            : ESP32 Dev Module
- * - Upload Speed     : 115200 atau 921600
- * - Partition Scheme : Huge APP (3MB No OTA / 1MB SPIFFS) -> PENTING untuk Bluetooth!
- *
- * PENGKABELAN:
- * - Servo Signal     : GPIO 18 (PWM Output)
- * - Servo VCC        : External 5V (+) (Dilarang dari 3.3V ESP32)
- * - Servo GND        : External GND (-)
- * - Common GND       : GND External disatukan dengan pin GND ESP32
+ * FITUR:
+ * 1. Startup Self-Test: Servo berputar 180° -> 0° -> 90° (Standby) saat pertama menyala
+ * 2. Dual Mode: Menerima perintah dari USB Serial (115200) & Bluetooth ("SmartTrash_ESP32")
+ * 3. Logika Sudut:
+ *    - DRY   : 30° (Kiri), tahan 2.5 detik, lalu otomatis kembali ke 90°
+ *    - WET   : 150° (Kanan), tahan 2.5 detik, lalu otomatis kembali ke 90°
+ *    - RESET : Langsung kembali ke 90° (Posisi Netral)
  * ============================================================================
  */
 
 #include <ESP32Servo.h>
 #include "BluetoothSerial.h"
 
-// Cek apakah Bluetooth diaktifkan di core ESP32
-#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
-#error "Bluetooth tidak aktif pada konfigurasi core ESP32 ini!"
-#endif
-
-// Objek Bluetooth Serial
+// Inisialisasi Bluetooth Serial
 BluetoothSerial SerialBT;
 
-// Definisi Pin & Parameter Hardware
+// Definisi Pin Hardware
 const int SERVO_PIN = 18;            // Output PWM Servo pada GPIO 18
 const int LED_PIN = 2;               // Built-in LED ESP32
 
 // Konfigurasi Sudut Servo
-const int ANGLE_DRY   = 30;          // Kiri: Sampah Kering
-const int ANGLE_RESET = 90;          // Posisi awal / Netral
-const int ANGLE_WET   = 150;         // Kanan: Sampah Basah
+const int ANGLE_DRY   = 30;          // Kiri: Sampah Kering (30°)
+const int ANGLE_RESET = 90;          // Posisi Netral / Standby (90°)
+const int ANGLE_WET   = 150;         // Kanan: Sampah Basah (150°)
 
-// Durasi Tahan Pemilahan (Milidetik) sebelum otomatis kembali ke netral
+// Durasi tahan pemilahan sebelum kembali ke netral (milidetik)
 const unsigned long SORT_HOLD_DURATION_MS = 2500;
 
 // Objek Servo
 Servo trashServo;
 
-// Variabel State Mesin Non-blocking
+// State Mesin Non-blocking
 int currentAngle = ANGLE_RESET;
 bool isSortingActive = false;
 unsigned long sortStartTime = 0;
 
-// Buffer string terpisah untuk USB dan Bluetooth
+// Buffer perintah
 String usbBuffer = "";
 String btBuffer = "";
 
 /**
- * Kirim feedback ke USB Serial dan Bluetooth sekaligus
+ * Kirim pesan feedback ke USB Serial dan Bluetooth sekaligus
  */
 void broadcastMessage(String msg) {
   Serial.println(msg);
@@ -72,9 +59,8 @@ void broadcastMessage(String msg) {
 
 /**
  * Menggerakkan servo secara halus (smooth stepping)
- * Mencegah lonjakan arus mendadak yang dapat mereset ESP32.
  */
-void moveToAngleSmooth(int target, int stepDelayMs = 10) {
+void moveToAngleSmooth(int target, int stepDelayMs = 8) {
   if (target == currentAngle) return;
 
   int step = (target > currentAngle) ? 1 : -1;
@@ -92,45 +78,50 @@ void setup() {
 
   // 2. Inisialisasi LED Indikator
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  digitalWrite(LED_PIN, HIGH);
 
-  // 3. Inisialisasi Wireless Bluetooth Serial
-  // Nama Bluetooth yang akan muncul saat dipindai dari laptop/HP:
+  // 3. Inisialisasi Bluetooth
   SerialBT.begin("SmartTrash_ESP32");
 
-  // 4. Alokasi timer PWM ESP32 untuk library ESP32Servo
+  // 4. Inisialisasi Timer PWM untuk Servo
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
-  // 5. Konfigurasi frekuensi standar SG90 (50Hz) & lebar pulsa (500us - 2400us)
-  trashServo.setPeriodHertz(50);
-  trashServo.attach(SERVO_PIN, 500, 2400);
+  trashServo.setPeriodHertz(50);             // Standar 50Hz SG90
+  trashServo.attach(SERVO_PIN, 500, 2400);    // Pulsa 500us - 2400us
 
-  // 6. Posisikan servo ke 90 derajat (Netral)
-  currentAngle = ANGLE_RESET;
-  trashServo.write(currentAngle);
-
-  // Tampilkan pesan inisialisasi
+  // ==============================================================
+  // 5. STARTUP SELF-TEST SERVO MOTOR: 180° -> 0° -> 90° (STANDBY)
+  // ==============================================================
   Serial.println("\n========================================================");
-  Serial.println("[ESP32] Smart Trash Sorting - DUAL MODE READY");
-  Serial.println("[ESP32] 1. USB Serial : 115200 bps");
-  Serial.println("[ESP32] 2. Bluetooth  : 'SmartTrash_ESP32' (Aktif)");
-  Serial.println("[ESP32] Servo Pin     : GPIO 18");
-  Serial.println("[ESP32] Status        : Posisi netral 90 deg siap!");
-  Serial.println("========================================================");
+  Serial.println("[ESP32] Memulai Startup Self-Test Servo Motor...");
+  
+  // Test A: Putar ke 180 derajat
+  Serial.println("[ESP32] [Self-Test] Gerak ke 180 derajat...");
+  moveToAngleSmooth(180, 6);
+  delay(800);
 
-  // Kedipkan LED 3x tanda siap
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_PIN, HIGH); delay(100);
-    digitalWrite(LED_PIN, LOW); delay(100);
-  }
+  // Test B: Putar ke 0 derajat
+  Serial.println("[ESP32] [Self-Test] Gerak ke 0 derajat...");
+  moveToAngleSmooth(0, 6);
+  delay(800);
+
+  // Test C: Kembali ke posisi Standby Netral (90 derajat)
+  Serial.println("[ESP32] [Self-Test] Kembali ke Standby (90 derajat)...");
+  moveToAngleSmooth(ANGLE_RESET, 6);
+  delay(500);
+
+  digitalWrite(LED_PIN, LOW);
+  Serial.println("[ESP32] Self-Test Selesai! Servo siap di 90 derajat.");
+  Serial.println("[ESP32] Bluetooth: 'SmartTrash_ESP32' | Baud: 115200");
+  Serial.println("========================================================\n");
 }
 
 void loop() {
   // -------------------------------------------------------------
-  // A. BACA DARI USB SERIAL (Jika terhubung kabel USB ke laptop)
+  // 1. BACA DARI USB SERIAL
   // -------------------------------------------------------------
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
@@ -147,7 +138,7 @@ void loop() {
   }
 
   // -------------------------------------------------------------
-  // B. BACA DARI WIRELESS BLUETOOTH (Tanpa kabel ke laptop)
+  // 2. BACA DARI BLUETOOTH WIRELESS
   // -------------------------------------------------------------
   while (SerialBT.available() > 0) {
     char c = (char)SerialBT.read();
@@ -164,12 +155,12 @@ void loop() {
   }
 
   // -------------------------------------------------------------
-  // C. TIMER NON-BLOCKING UNTUK KEMBALI OTOMATIS KE NETRAL (90°)
+  // 3. TIMER OTOMATIS KEMBALI KE POSISI NETRAL (90°)
   // -------------------------------------------------------------
   if (isSortingActive) {
     if (millis() - sortStartTime >= SORT_HOLD_DURATION_MS) {
-      broadcastMessage("[ESP32] Status: Selesai memilah -> Kembali ke Netral (90 deg)...");
-      moveToAngleSmooth(ANGLE_RESET, 10);
+      broadcastMessage("[ESP32] Selesai memilah -> Kembali ke Netral (90 deg)...");
+      moveToAngleSmooth(ANGLE_RESET, 8);
       isSortingActive = false;
       digitalWrite(LED_PIN, LOW);
       broadcastMessage("[ESP32] OK: Posisi netral siap (90 deg).");
@@ -178,7 +169,7 @@ void loop() {
 }
 
 /**
- * Pemrosesan Perintah DRY, WET, dan RESET
+ * Eksekusi perintah DRY, WET, RESET
  */
 void processCommand(String cmd, String source) {
   cmd.toUpperCase();
@@ -186,23 +177,23 @@ void processCommand(String cmd, String source) {
   if (cmd == "DRY") {
     digitalWrite(LED_PIN, HIGH);
     broadcastMessage("[ESP32] [" + source + "] DRY diterima -> Gerak KIRI (30 deg)...");
-    moveToAngleSmooth(ANGLE_DRY, 8);
+    moveToAngleSmooth(ANGLE_DRY, 7);
     isSortingActive = true;
     sortStartTime = millis();
-    broadcastMessage("[ESP32] OK: Posisi 30 deg (DRY) aktif.");
+    broadcastMessage("[ESP32] OK: Servo pada 30 deg (DRY).");
   }
   else if (cmd == "WET") {
     digitalWrite(LED_PIN, HIGH);
     broadcastMessage("[ESP32] [" + source + "] WET diterima -> Gerak KANAN (150 deg)...");
-    moveToAngleSmooth(ANGLE_WET, 8);
+    moveToAngleSmooth(ANGLE_WET, 7);
     isSortingActive = true;
     sortStartTime = millis();
-    broadcastMessage("[ESP32] OK: Posisi 150 deg (WET) aktif.");
+    broadcastMessage("[ESP32] OK: Servo pada 150 deg (WET).");
   }
   else if (cmd == "RESET") {
     digitalWrite(LED_PIN, LOW);
     broadcastMessage("[ESP32] [" + source + "] RESET diterima -> Kembali ke NETRAL (90 deg)...");
-    moveToAngleSmooth(ANGLE_RESET, 8);
+    moveToAngleSmooth(ANGLE_RESET, 7);
     isSortingActive = false;
     broadcastMessage("[ESP32] OK: Posisi 90 deg (NETRAL) aktif.");
   }
