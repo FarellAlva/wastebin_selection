@@ -1,239 +1,231 @@
-# Smart Trash Sorting System
-### Integrasi Computer Vision (Teachable Machine) + JavaScript + Web Serial API + ESP32 & Servo Motor
+# 🗑️ Panduan Menjalankan Proyek: Smart Trash Sorting System
+> **Sistem Pemilahan Sampah Otomatis Berbasis Web AI (Teachable Machine) + ESP32 & Servo Motor**
 
-Sistem pemilahan sampah otomatis berbasis kecerdasan buatan (Computer Vision) yang berjalan sepenuhnya di sisi peramban (client-side browser). Sistem mengklasifikasikan sampah menjadi dua kategori utama:
-- **DRY (Sampah Kering)**: Kertas, kardus, botol plastik, daun kering.
-- **WET (Sampah Basah)**: Sisa makanan, kulit buah, sayuran basah.
-
-Setelah sampah terdeteksi secara stabil dengan tingkat keyakinan (confidence) $\ge 85\%$, sistem secara otomatis mengirimkan sinyal perintah melalui kabel USB via **Web Serial API** ke mikrokontroler **ESP32** untuk menggerakkan servo motor ke arah wadah yang tepat.
+Dokumen ini berisi panduan langkah-demi-langkah yang lengkap dan praktis untuk merakit perangkat keras, mengunggah kode ke ESP32, serta menjalankan dashboard web di laptop Anda.
 
 ---
 
-## 1. Arsitektur & Alur Kerja Sistem
-
-```
-+--------------------------------------------------------------------------+
-|                            LAPTOP BROWSER                                |
-|  [Webcam Laptop]                                                         |
-|         │                                                                |
-|         ▼                                                                |
-|  [MediaDevices API / HTML5 Video Stream]                                 |
-|         │                                                                |
-|         ▼                                                                |
-|  [Teachable Machine Image Model (TensorFlow.js)]                         |
-|         │                                                                |
-|         ▼                                                                |
-|  [AI Logic Engine]                                                       |
-|   ├─ Confidence >= 85%                                                   |
-|   ├─ Frame Stability (6 frames berturut-turut)                           |
-|   ├─ Cooldown Guard (4000ms - satu trigger per objek)                    |
-|   └─ Dynamic Mapping: "sampah kering" -> DRY | "sampah basah" -> WET     |
-|         │                                                                |
-|         ▼                                                                |
-|  [Web Serial API (115200 bps)]                                           |
-+---------┼----------------------------------------------------------------+
-          │ (Kabel Data USB - Perintah ASCII: DRY\n, WET\n, RESET\n)
-          ▼
-+--------------------------------------------------------------------------+
-|                              HARDWARE                                    |
-|  [ESP32 Dev Module]                                                      |
-|   ├─ GPIO 18 (PWM Signal via ESP32Servo)                                 |
-|   └─ Common Ground (GND)                                                 |
-|         │                                                                |
-|         ▼                                                                |
-|  [Servo SG90 / MG90S] ◄── [Power Supply Eksternal 5V / 2A]               |
-|   ├─ 30°  : Kiri (Wadah Sampah Kering / DRY)                             |
-|   ├─ 90°  : Netral (Standby / RESET)                                     |
-|   └─ 150° : Kanan (Wadah Sampah Basah / WET)                             |
-+--------------------------------------------------------------------------+
-```
+## 📋 Daftar Isi
+1. [Prasyarat Sistem](#1-prasyarat-sistem)
+2. [Skema Wiring Hardware](#2-skema-wiring-hardware)
+3. [Langkah 1: Upload Firmware ke ESP32](#langkah-1-upload-firmware-ke-esp32)
+4. [Langkah 2: Menjalankan Dashboard Web](#langkah-2-menjalankan-dashboard-web)
+5. [Langkah 3: Pengujian & Pemilahan Sampah](#langkah-3-pengujian--pemilahan-sampah)
+6. [Struktur File Proyek](#struktur-file-proyek)
+7. [Panduan Troubleshooting](#panduan-troubleshooting)
 
 ---
 
-## 2. Struktur Proyek
+## 1. Prasyarat Sistem
+
+### Perangkat Keras:
+- **Board ESP32** (ESP32 DevKit V1 / NodeMCU-32S).
+- **Servo Motor SG90** (atau MG90S).
+- **Power Supply Eksternal 5V** (Adaptor DC 5V / 2A atau modul baterai) untuk menyuplai servo.
+- **Kabel USB Data** (untuk menghubungkan ESP32 ke port USB laptop).
+- **Kabel Jumper** (Male-to-Female / Male-to-Male).
+- **Webcam Laptop** yang berfungsi baik.
+
+### Perangkat Lunak:
+- **Google Chrome** atau **Microsoft Edge** versi desktop terbaru (Web Serial API & MediaDevices hanya didukung penuh pada browser berbasis Chromium).
+- **Arduino IDE** (versi 1.8.x atau 2.x).
+- **Driver USB-to-UART ESP32** (CP210x atau CH340) terpasang di Windows.
+
+---
+
+## 2. Skema Wiring Hardware
+
+Hubungkan komponen sesuai tabel dan diagram berikut:
+
+| Pin Komponen | Warna Kabel | Terhubung Ke | Catatan Penting |
+|---|---|---|---|
+| **Servo Signal (PWM)** | Oranye / Kuning | **GPIO 18** (ESP32) | Pin kontrol sudut servo |
+| **Servo VCC (+)** | Merah | **5V Power Supply Eksternal** | ⚠️ **Dilarang** mengambil dari pin 3.3V ESP32 |
+| **Servo GND (-)** | Cokelat / Hitam | **GND Power Supply Eksternal** | Kutub negatif catu daya |
+| **Common Ground** | Kabel Jumper | **GND ESP32 $\longleftrightarrow$ GND Eksternal** | ⚠️ **WAJIB DISATUKAN** untuk referensi ground |
+| **ESP32 USB** | Kabel USB Data | **Port USB Laptop** | Daya ESP32 & jalur Web Serial API |
+
+### 📌 Diagram Blok Sirkuit:
+```
+   [Power Supply Eksternal 5V]
+       (+) 5V  ────────────────────► Kabel MERAH Servo (VCC)
+       (-) GND ──────────┬─────────► Kabel COKELAT Servo (GND)
+                         │
+                         └─────────► Pin GND ESP32 (Common Ground)
+
+   [ESP32 Dev Board]
+       Pin GPIO 18 ────────────────► Kabel ORANYE Servo (PWM Signal)
+       Port USB    ────────────────► Port USB Laptop (Web Serial API)
+```
+
+> [!CAUTION]
+> - **Jangan gunakan GPIO 34**: Pin GPIO 34, 35, 36, dan 39 pada ESP32 adalah *input-only* dan tidak dapat mengeluarkan sinyal PWM ke servo.
+> - **Selalu satukan GND**: Tanpa sambungan *Common Ground*, servo akan bergetar tak terkendali (*jitter*) karena hilangnya referensi sinyal logika.
+
+---
+
+## Langkah 1: Upload Firmware ke ESP32
+
+1. **Buka Arduino IDE** di laptop Anda.
+2. **Pasang Library `ESP32Servo`**:
+   - Di Arduino IDE, buka menu: **Sketch** $\rightarrow$ **Include Library** $\rightarrow$ **Manage Libraries...**
+   - Di kolom pencarian, ketik: `ESP32Servo`
+   - Cari library **ESP32Servo by Kevin Harrington**, lalu klik **Install**.
+3. **Buka File Firmware**:
+   - Buka file [esp32/esp32_servo.ino](file:///d:/project-internship/wastebin_selection/esp32/esp32_servo.ino) (atau file [sketch_nov21a/sketch_nov21a.ino](file:///d:/project-internship/wastebin_selection/sketch_nov21a/sketch_nov21a.ino)).
+4. **Pilih Board & Port**:
+   - Menu **Tools** $\rightarrow$ **Board** $\rightarrow$ **ESP32 Arduino** $\rightarrow$ pilih **ESP32 Dev Module**.
+   - Menu **Tools** $\rightarrow$ **Port** $\rightarrow$ pilih port COM ESP32 Anda (contoh: `COM3`, `COM4`, dsb).
+   - Menu **Tools** $\rightarrow$ **Upload Speed** $\rightarrow$ pilih `115200` atau `921600`.
+5. **Upload Program**:
+   - Klik tombol **Upload** (ikon panah ke kanan `➔`).
+   - *Tips*: Jika muncul teks `Connecting........_____.....` di konsol Arduino IDE, tekan dan tahan tombol **BOOT** pada board ESP32 selama 2 detik sampai proses flashing dimulai.
+6. **Tutup Serial Monitor Arduino IDE**:
+   - ⚠️ **PENTING**: Pastikan jendela *Serial Monitor* di Arduino IDE ditutup sebelum membuka dashboard web, agar port COM tidak terkunci.
+
+---
+
+## Langkah 2: Menjalankan Dashboard Web
+
+> [!IMPORTANT]
+> Karena peramban Google Chrome menerapkan standar keamanan tinggi untuk fitur **Web Serial API** dan **Webcam**, dashboard **harus dibuka melalui server lokal (`http://localhost` / `http://127.0.0.1`)**, bukan dengan klik ganda berkas `file:///`.
+
+Pilih salah satu cara tercepat berikut:
+
+### 🌟 Cara A: 1-Klik Launcher (Paling Praktis)
+Cukup klik ganda (double-click) file:
+👉 **[start_dashboard.bat](file:///d:/project-internship/wastebin_selection/start_dashboard.bat)**
+
+Script ini otomatis mendeteksi server lokal di komputer Anda dan langsung membuka dashboard di browser default.
+
+---
+
+### 🌐 Cara B: Menggunakan VS Code Live Server
+1. Buka folder proyek ini di **Visual Studio Code**.
+2. Pasang ekstensi **Live Server** (oleh Ritwick Dey) jika belum terpasang.
+3. Klik kanan pada file [index.html](file:///d:/project-internship/wastebin_selection/index.html), lalu pilih **"Open with Live Server"**.
+4. Browser akan otomatis terbuka di `http://127.0.0.1:5500/`.
+
+---
+
+### 🐍 Cara C: Menggunakan Python (Command Prompt / PowerShell)
+Buka terminal di folder proyek ini:
+```powershell
+python -m http.server 8000
+```
+Buka Google Chrome dan ketik alamat:
+`http://localhost:8000`
+
+---
+
+### 📦 Cara D: Menggunakan Node.js / NPX
+Buka terminal di folder proyek ini:
+```powershell
+npx serve -l 3000 .
+```
+Buka Google Chrome dan ketik alamat:
+`http://localhost:3000`
+
+---
+
+## Langkah 3: Pengujian & Pemilahan Sampah
+
+Setelah antarmuka terbuka di Google Chrome:
+
+1. **Pastikan Model AI Siap**:
+   - Periksa indikator status di bilah atas: badge harus berwarna hijau bertuliskan **`Model: Siap (2 Kelas)`**.
+   - Model yang digunakan adalah model Teachable Machine Anda: `https://teachablemachine.withgoogle.com/models/YVOo01Icl/` dengan label:
+     - `sampah kering` $\rightarrow$ Sampah Kering (DRY)
+     - `sampah basah` $\rightarrow$ Sampah Basah (WET)
+
+2. **Hubungkan ESP32**:
+   - Pastikan power supply 5V eksternal servo telah menyala.
+   - Klik tombol hijau **"Hubungkan ESP32"**.
+   - Sebuah jendela pop-up Chrome akan muncul menampilkan daftar port USB. Pilih board ESP32 Anda, lalu klik **Connect**.
+   - Servo akan otomatis bergerak ke posisi netral **90°**, dan terminal log di layar web akan menampilkan respon konfirmasi dari ESP32.
+
+3. **Uji Kontrol Manual**:
+   - Klik tombol **"Kiri (30° DRY)"** $\rightarrow$ Servo bergerak ke 30° lalu kembali ke 90°.
+   - Klik tombol **"Kanan (150° WET)"** $\rightarrow$ Servo bergerak ke 150° lalu kembali ke 90°.
+   - Klik tombol **"Netral (90°)"** $\rightarrow$ Servo kembali ke posisi awal 90°.
+
+4. **Aktifkan Kamera & Deteksi Otomatis**:
+   - Klik tombol biru **"Mulai Deteksi"**.
+   - Klik **Allow** pada dialog izin akses webcam.
+   - Posisikan sampel sampah (contoh: kertas/plastik atau sisa makanan/buah) di dalam kotak pemandu (*Target Reticle*).
+
+5. **Mekanisme Otomatis**:
+   - Sistem akan mengevaluasi tingkat keyakinan (confidence).
+   - Indikator kestabilan frame akan bertambah ($1/6 \rightarrow 6/6$).
+   - Begitu confidence mencapai minimal **85%** dan stabil selama 6 frame:
+     1. Suara lonceng (*chime*) berbunyi.
+     2. Perintah serial dikirimkan (`DRY\n` atau `WET\n`).
+     3. Servo berputar ke sudut yang sesuai (**30° Kiri** untuk kering, **150° Kanan** untuk basah).
+     4. Servo menahan sampah selama 2.5 detik lalu kembali ke posisi netral 90°.
+     5. Cooldown aktif selama 4 detik mengunci deteksi berulang untuk objek yang sama.
+     6. Data pemilahan tercatat rapi di tabel riwayat dan statistik bertambah.
+
+---
+
+## Struktur File Proyek
 
 ```
-smart-trash-sorting/
-├── index.html          # Antarmuka dashboard modern, HUD kamera & kontrol
-├── style.css           # Desain visual responsif, dark futuristic glassmorphism
-├── app.js              # Logika AI, Web Serial API, manajemen kamera & state
+wastebin_selection/
+├── start_dashboard.bat          # Script 1-klik untuk menjalankan server & browser
+├── index.html                   # Halaman dashboard utama
+├── style.css                    # Tampilan modern dark futuristic glassmorphism
+├── app.js                       # Logika AI, Web Serial API, dan kamera
+├── README.md                    # Dokumentasi lengkap proyek
+│
 ├── esp32/
-│   └── esp32_servo.ino # Firmware Arduino C++ dengan library ESP32Servo
-├── model/              # File model Teachable Machine lokal
+│   └── esp32_servo.ino          # Firmware Arduino C++ untuk ESP32
+├── sketch_nov21a/
+│   └── sketch_nov21a.ino        # Salinan firmware siap flash di Arduino IDE
+│
+├── model/                       # File model Teachable Machine offline/lokal
 │   ├── model.json
 │   ├── metadata.json
 │   └── weights.bin
-├── libs/               # Dependensi TensorFlow.js & TM Image lokal (fallback offline)
+│
+├── libs/                        # Library TensorFlow.js & TM Image lokal (fallback offline)
 │   ├── tf.min.js
 │   └── teachablemachine-image.min.js
-└── README.md           # Panduan instalasi, konfigurasi, wiring, dan troubleshooting
+│
+└── smart-trash-sorting/         # Folder bundle terisolasi siap distribusi
 ```
 
 ---
 
-## 3. Konfigurasi Hardware & Skema Wiring
+## Panduan Troubleshooting
 
-### 3.1 Daftar Komponen
-1. **Mikrokontroler**: ESP32 DevKit V1 (30 atau 38 pin).
-2. **Aktuator**: Motor Servo SG90 atau MG90S (Metal Gear).
-3. **Power Supply**: Adaptor 5V / 2A atau Modul Step-Down / Baterai untuk suplai servo eksternal.
-4. **Kabel**: Kabel USB data (menghubungkan ESP32 ke port USB laptop) & kabel jumper.
-
-### 3.2 Tabel Koneksi Pin
-
-| Komponen | Pin Servo | Pin ESP32 / Sumber Daya | Keterangan |
-|---|---|---|---|
-| **Signal Servo** | Kabel Oranye / Kuning | **GPIO 18** | Output PWM kontrol sudut |
-| **VCC Servo** | Kabel Merah | **VCC External 5V (+)** | **WAJIB** daya eksternal (jangan dari pin 3.3V ESP32) |
-| **GND Servo** | Kabel Cokelat / Hitam | **GND External (-)** | Kutub negatif catu daya |
-| **Common GND** | — | **GND ESP32 ke GND External** | **WAJIB** disatukan agar level sinyal seimbang |
-| **ESP32 Power**| Port Micro USB | **Port USB Laptop** | Daya ESP32 & komunikasi Serial |
-
-> [!CAUTION]
-> **PENTING TENTANG DAYA DAN PIN ESP32:**
-> 1. **Dilarang memakai GPIO 34**: Pada ESP32, pin GPIO 34, 35, 36 (VP), dan 39 (VN) adalah pin *input-only* (tanpa sirkuit output PWM). Gunakan selalu **GPIO 18** seperti yang telah dikonfigurasi.
-> 2. **Dilarang menyalakan Servo langsung dari pin 3.3V ESP32**: Servo SG90 saat bergerak dapat menarik arus sesaat hingga 500mA - 800mA. Mengambil daya dari pin 3.3V internal ESP32 akan memicu *brownout detector* yang menyebabkan ESP32 sering restart berulang kali. Gunakan suplai eksternal 5V dengan **GND bersama (Common GND)**.
-
-### 3.3 Diagram Blok Pengkabelan
-```
-   [External 5V DC PSU]
-       (+) ───► Kabel Merah Servo (VCC)
-       (-) ───┬───► Kabel Cokelat Servo (GND)
-              │
-              └───► Pin GND ESP32 (Common Ground)
-
-   [ESP32 Board]
-       GPIO 18 ───► Kabel Oranye Servo (PWM Signal)
-       Micro USB ──► Port USB Laptop (Web Serial API)
-```
+### ❓ Web Serial API: Tombol "Hubungkan ESP32" Tidak Merespon atau Port Tidak Muncul
+- **Pemeriksaan 1**: Pastikan Anda menggunakan **Google Chrome** atau **Microsoft Edge**. Mozilla Firefox dan Safari tidak mendukung Web Serial API.
+- **Pemeriksaan 2**: Pastikan dashboard dibuka melalui alamat `http://localhost:...` atau `http://127.0.0.1:...`. Web Serial diblokir oleh browser pada protokol `file:///`.
+- **Pemeriksaan 3**: Pastikan **Serial Monitor Arduino IDE sudah DITUTUP**. Satu port COM hanya dapat diakses oleh satu aplikasi pada satu waktu.
+- **Pemeriksaan 4**: Buka *Device Manager* di Windows. Jika port COM memiliki tanda seru kuning, pasang driver USB serial chip Anda (driver **CH340** atau **CP210x**).
 
 ---
 
-## 4. Logika Servo & Protokol Serial
-
-ESP32 berkomunikasi dua arah melalui port USB UART pada baud rate **115200 bps**.
-
-### Tabel Logika Sudut Servo:
-| Perintah Serial | Sudut Servo | Arah Fisik | Fungsi | Durasi Tahan |
-|---|---:|---|---|---|
-| `DRY\n` | **30°** | Kiri | Mengarahkan sampah kering | Tahan 2.5 detik lalu kembali ke 90° |
-| `WET\n` | **150°** | Kanan | Mengarahkan sampah basah | Tahan 2.5 detik lalu kembali ke 90° |
-| `RESET\n`| **90°** | Tengah | Posisi netral / standby | Langsung ke 90° |
-
----
-
-## 5. Panduan Instalasi & Menjalankan Firmware ESP32
-
-1. Buka aplikasi **Arduino IDE** (versi 1.8.x atau 2.x).
-2. Pasang board ESP32 di Arduino IDE:
-   - Buka `File` > `Preferences`.
-   - Masukkan URL package board di *Additional Boards Manager URLs*:
-     ```
-     https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-     ```
-   - Buka `Tools` > `Board` > `Boards Manager`, cari **esp32** oleh Espressif Systems, lalu klik **Install**.
-3. Pasang library **ESP32Servo**:
-   - Buka `Sketch` > `Include Library` > `Manage Libraries...`.
-   - Di kotak pencarian, ketik: `ESP32Servo`.
-   - Pilih library **ESP32Servo by Kevin Harrington** dan klik **Install**.
-4. Buka file firmware:
-   - Buka file `esp32/esp32_servo.ino` (atau `sketch_nov21a/sketch_nov21a.ino`).
-5. Pilih Board & Port:
-   - `Tools` > `Board` > `ESP32 Arduino` > `ESP32 Dev Module`.
-   - `Tools` > `Port` > Pilih port COM ESP32 Anda (misal: COM3, COM4, dsb).
-   - `Tools` > `Upload Speed` > `115200` atau `921600`.
-6. Klik tombol **Upload** (panah kanan).
-7. Jika Arduino IDE menampilkan teks *Connecting........*, tekan dan tahan tombol **BOOT** pada board ESP32 selama 2 detik hingga proses flashing mulai berjalan.
-
----
-
-## 6. Panduan Menjalankan Web Dashboard
-
-Web Serial API dan MediaDevices (Kamera) merupakan fitur keamanan browser tingkat lanjut yang membutuhkan protokol yang aman (**`localhost`** atau **`https://`**). Jangan membuka file langsung dengan double click `file:///...`.
-
-### Opsi A: Menggunakan VS Code Live Server (Direkomendasikan)
-1. Buka folder proyek ini di **Visual Studio Code**.
-2. Pasang ekstensi **Live Server** (oleh Ritwick Dey).
-3. Klik kanan pada file `index.html`, lalu pilih **"Open with Live Server"**.
-4. Browser Google Chrome akan terbuka secara otomatis di `http://127.0.0.1:5500`.
-
-### Opsi B: Menggunakan Node.js `npx serve` atau `http-server`
-Buka terminal / PowerShell di direktori proyek:
-```bash
-npx serve .
-# atau
-npx http-server -p 8080
-```
-Buka browser Google Chrome dan akses alamat `http://localhost:3000` atau `http://localhost:8080`.
-
-### Opsi C: Menggunakan Python (Built-in)
-Jika Anda memiliki Python:
-```bash
-python -m http.server 8000
-```
-Buka browser Google Chrome ke `http://localhost:8000`.
-
----
-
-## 7. Langkah Pengujian Langkah Demi Langkah
-
-1. **Hubungkan ESP32 ke Laptop**:
-   - Tancapkan kabel USB ESP32 ke port laptop.
-   - Pastikan power supply 5V untuk servo sudah menyala.
-2. **Buka Web Dashboard di Google Chrome**:
-   - Status indikator awal akan menunjukkan *ESP32: Terputus* dan *Model: Memuat...*.
-   - Tunggu 1–2 detik sampai indikator model berubah hijau: *Model: Siap (2 Kelas)*.
-3. **Hubungkan Web Serial**:
-   - Klik tombol **"Hubungkan ESP32"**.
-   - Jendela pop-up Chrome akan muncul meminta Anda memilih perangkat USB Serial.
-   - Pilih perangkat (misal: *CP2102 USB to UART Bridge Controller* atau *USB-SERIAL CH340*) lalu klik **Connect**.
-   - Servo akan bergerak ke posisi 90° (Netral) dan di Log Komunikasi muncul pesan konfirmasi dari ESP32.
-4. **Uji Pergerakan Manual**:
-   - Klik tombol **"Kiri (30° DRY)"** -> Servo mengarah ke 30° dan kembali otomatis ke 90°.
-   - Klik tombol **"Kanan (150° WET)"** -> Servo mengarah ke 150° dan kembali otomatis ke 90°.
-   - Klik tombol **"Netral (90°)"** -> Memastikan servo berada tepat di posisi tengah.
-5. **Mulai Deteksi Otomatis**:
-   - Klik tombol **"Mulai Deteksi"**.
-   - Setujui dialog izin browser (*Allow Camera*).
-   - Video webcam akan tampil di layar dengan kotak panduan (*Target Reticle*).
-6. **Uji Pemilahan Sampah**:
-   - Arahkan kertas/plastik (Sampah Kering) ke depan kamera.
-   - Baris kestabilan akan mengisi frame berturut-turut ($1/6 \rightarrow 6/6$).
-   - Begitu stabil di atas 85%, sistem membunyikan nada lonceng (*chime*), mengirimkan `DRY\n` ke ESP32, dan servo bergerak ke 30°.
-   - Cooldown aktif selama 4 detik mengunci deteksi agar satu benda tidak memicu servo berkali-kali.
-   - Setelah selesai, servo kembali ke 90° siap mendeteksi sampah berikutnya.
-
----
-
-## 8. Panduan Troubleshooting Lengkap
-
-### Masalah 1: Web Serial API Tidak Muncul atau Port Tidak Terdeteksi
-- **Penyebab**: Menggunakan peramban yang tidak mendukung atau driver USB-to-UART belum terpasang di Windows.
+### ❓ Servo: ESP32 Tiba-Tiba Restart saat Servo Mulai Bergerak
+- **Penyebab**: *Brownout detector* ESP32 aktif karena tegangan drop drastis akibat motor servo menarik arus besar dari ESP32.
 - **Solusi**:
-  1. Pastikan menggunakan **Google Chrome** atau **Microsoft Edge** versi desktop. Mozilla Firefox dan Safari tidak mendukung Web Serial API.
-  2. Pastikan web dibuka melalui `http://localhost:...` atau `http://127.0.0.1:...`, bukan dibuka langsung melalui protocol `file:///`.
-  3. Cek apakah driver USB Serial chip ESP32 Anda sudah terpasang di Windows Device Manager:
-     - Jika board memakai chip Silicon Labs: Unduh dan pasang **CP210x Driver**.
-     - Jika board memakai chip WCH: Unduh dan pasang **CH340/CH341 Driver**.
-  4. Tutup **Serial Monitor** pada aplikasi Arduino IDE jika sedang terbuka, karena satu port COM serial tidak dapat diakses oleh dua aplikasi sekaligus.
+  1. Jangan hubungkan kabel VCC merah servo ke pin 3.3V atau VIN ESP32!
+  2. Gunakan adaptor eksternal 5V dengan arus minimal 1.5A–2A.
+  3. Pastikan kabel GND adaptor eksternal disambungkan ke pin GND ESP32 (**Common Ground**).
+  4. Pasang kapasitor elektrolit $100\mu\text{F} - 470\mu\text{F}$ secara paralel pada kutub (+) dan (-) power supply servo untuk menyerap hentakan daya.
 
-### Masalah 2: Webcam Tidak Tampil / Layar Hitam
-- **Penyebab**: Izin kamera diblokir oleh peramban atau webcam sedang digunakan oleh aplikasi lain (seperti Zoom, Teams, Camera app).
-- **Solusi**:
-  1. Klik ikon gembok / perizinan di sebelah kiri kolom URL Chrome, pastikan **Camera** diset ke **Allow**.
-  2. Tutup seluruh aplikasi lain di laptop yang sedang mengakses webcam.
-  3. Muat ulang halaman web (`Ctrl + F5`).
+---
 
-### Masalah 3: ESP32 Tiba-tiba Restart saat Servo Bergerak (Brownout Detector)
-- **Penyebab**: Tegangan anjlok (*voltage drop*) akibat motor servo mengambil arus besar langsung dari pin suplai ESP32.
+### ❓ Kamera: Layar Webcam Hitam atau Izin Akses Ditolak
 - **Solusi**:
-  1. Jangan hubungkan kabel VCC merah servo ke pin 3V3 atau pin VIN ESP32!
-  2. Gunakan adaptor atau baterai eksternal 5V dengan arus minimal 1.5A–2A khusus untuk motor servo.
-  3. Pastikan kabel GND adaptor eksternal tetap terhubung ke pin GND ESP32 (*Common Ground*).
-  4. Pasang kapasitor elektrolit $100\mu F$ - $470\mu F$ paralel pada jalur power VCC dan GND servo untuk meredam lonjakan arus sesaat.
+  1. Klik ikon perizinan di samping kiri kolom URL browser Chrome, lalu ubah status **Camera** menjadi **Allow**.
+  2. Pastikan tidak ada aplikasi lain (seperti Zoom, Google Meet, Skype, atau aplikasi Kamera bawaan Windows) yang sedang memakai webcam.
+  3. Muat ulang halaman dengan menekan tombol `Ctrl + F5`.
 
-### Masalah 4: Servo Bergetar (Jitter) atau Bergerak Tidak Sesuai Derajat
-- **Penyebab**: Kebisingan sinyal PWM atau kabel jumper kendur.
+---
+
+### ❓ Model AI: Muncul Peringatan "Model Gagal Dimuat"
 - **Solusi**:
-  1. Pastikan kabel oranye/kuning servo terpasang kokoh ke **GPIO 18**.
-  2. Periksa kembali lebar pulsa PWM di firmware. Servo SG90 standar merespons pulsa antara $500\mu s$ (0°) sampai $2400\mu s$ (180°), yang sudah dikonfigurasi di `trashServo.attach(SERVO_PIN, 500, 2400);`.
+  1. Klik tombol **"Pengaturan Model & Sensitivitas"** di bawah kartu klasifikasi.
+  2. Klik tombol chip **"Model Lokal (./model/)"** untuk memuat file model dari folder lokal di laptop Anda tanpa membutuhkan koneksi internet.
+  3. Klik tombol **"Muat Ulang"**.
