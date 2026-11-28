@@ -224,12 +224,25 @@
               <div class="prob-header">
                 <div class="prob-name">
                   <span class="prob-dot dot-wet"></span>
-                  <span class="prob-title">Sampah Basah (WET)</span>
+                  <span class="prob-title">Sampah Basah / Organic (WET)</span>
                 </div>
                 <span class="prob-pct" id="pct-wet">0.0%</span>
               </div>
               <div class="prob-bar-bg">
                 <div class="prob-bar-fill bar-wet" id="bar-wet" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <div class="class-prob-row" id="row-bg">
+              <div class="prob-header">
+                <div class="prob-name">
+                  <span class="prob-dot dot-bg" style="background:#94a3b8;"></span>
+                  <span class="prob-title">Background (Kosong / Netral)</span>
+                </div>
+                <span class="prob-pct" id="pct-bg">0.0%</span>
+              </div>
+              <div class="prob-bar-bg">
+                <div class="prob-bar-fill bar-bg" id="bar-bg" style="width: 0%; background:#64748b;"></div>
               </div>
             </div>
           </div>
@@ -250,13 +263,14 @@
               <div class="form-group">
                 <label for="input-model-url">URL / Folder Model Teachable Machine:</label>
                 <div class="input-with-button">
-                  <input type="text" id="input-model-url" value="https://teachablemachine.withgoogle.com/models/YVOo01Icl/" placeholder="URL atau ./model/">
+                  <input type="text" id="input-model-url" value="./tm-my-image-models-js-new/" placeholder="./tm-my-image-models-js-new/">
                   <button id="btn-reload-model" class="btn btn-outline-sm">Muat Ulang</button>
                 </div>
                 <div class="quick-sources">
                   <span>Sumber cepat:</span>
+                  <button type="button" class="btn-chip" id="btn-src-new3">Model Baru 3-Kelas (Lokal)</button>
                   <button type="button" class="btn-chip" id="btn-src-online">Teachable Machine Online</button>
-                  <button type="button" class="btn-chip" id="btn-src-local">Model Lokal (./model/)</button>
+                  <button type="button" class="btn-chip" id="btn-src-local">Model Lama (./model/)</button>
                 </div>
               </div>
               <div class="form-group">
@@ -277,13 +291,24 @@
         <div class="card connection-card">
           <div class="card-header">
             <div class="card-title-group">
-              <span class="card-badge hardware">USB & WIRELESS BLUETOOTH</span>
+              <span class="card-badge hardware">WIFI HTTP / USB / BLUETOOTH</span>
               <h2>Koneksi ESP32</h2>
             </div>
             <div class="badge-status-pill" id="badge-connection-state">
               <span class="dot-indicator red"></span>
               <span id="conn-state-label">Belum Terhubung</span>
             </div>
+          </div>
+
+          <!-- Opsi 1: Koneksi WiFi Lokal (Wireless tanpa kabel) -->
+          <div class="form-group" style="margin-bottom:14px;background:var(--bg-card-sub);padding:12px;border-radius:var(--radius-md);border:1px solid var(--border-color);">
+            <label for="input-wifi-ip">Alamat IP ESP32 (Koneksi WiFi / Hotspot <code>defis_esp</code>):</label>
+            <div class="input-with-button" style="margin-bottom:8px;">
+              <input type="text" id="input-wifi-ip" value="http://192.168.4.1" placeholder="http://192.168.4.1">
+              <button id="btn-connect-wifi" class="btn btn-primary btn-sm">Hubungkan WiFi</button>
+              <button id="btn-disconnect-wifi" class="btn btn-outline-sm" disabled>Putus</button>
+            </div>
+            <span style="font-size:0.72rem;color:var(--text-dim);">Pastikan perangkat ini terhubung ke WiFi ESP32 (<code>defis_esp</code>) atau WiFi yang sama.</span>
           </div>
 
           <div class="connection-action-bar">
@@ -294,10 +319,10 @@
                 <line x1="6" y1="6" x2="6.01" y2="6"></line>
                 <line x1="6" y1="18" x2="6.01" y2="18"></line>
               </svg>
-              <span>Hubungkan ESP32 (USB / Bluetooth)</span>
+              <span>Hubungkan USB / Bluetooth Serial</span>
             </button>
             <button id="btn-disconnect-esp32" class="btn btn-outline" disabled>
-              <span>Putus Sambungan</span>
+              <span>Putus Serial</span>
             </button>
           </div>
 

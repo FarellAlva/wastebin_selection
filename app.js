@@ -7,7 +7,8 @@
 
 // Global Configuration
 const CONFIG = {
-  DEFAULT_MODEL_URL: "https://teachablemachine.withgoogle.com/models/YVOo01Icl/",
+  DEFAULT_MODEL_URL: "./tm-my-image-models-js-new/",
+  ONLINE_MODEL_URL: "https://teachablemachine.withgoogle.com/models/YVOo01Icl/",
   LOCAL_MODEL_URL: "./model/",
   BAUD_RATE: 115200,
   SERVO_PIN: 18,
@@ -15,9 +16,9 @@ const CONFIG = {
   STABILITY_FRAMES_REQ: 6,     // Jumlah frame stabil sebelum trigger perintah
   COOLDOWN_MS: 4000,           // Cooldown pencegah pemicuan ganda (4 detik)
   ANGLES: {
-    DRY: 30,                   // 30° untuk sampah kering (Kiri)
-    WET: 150,                  // 150° untuk sampah basah (Kanan)
-    RESET: 90                  // 90° untuk posisi netral
+    DRY: 30,                   // 30° untuk sampah kering / anorganic (Kiri)
+    WET: 150,                  // 150° untuk sampah basah / organic (Kanan)
+    RESET: 90                  // 90° untuk posisi netral / background
   }
 };
 
@@ -37,12 +38,14 @@ const AppState = {
   isCameraRunning: false,
   animationFrameId: null,
 
-  // Serial state
+  // Serial & WiFi state
   serialPort: null,
   serialReader: null,
   serialWriter: null,
   isSerialConnected: false,
   keepReadingSerial: false,
+  wifiBaseUrl: "http://192.168.4.1",
+  isWifiConnected: false,
 
   // Detection logic state
   currentThreshold: CONFIG.DEFAULT_THRESHOLD,
@@ -104,18 +107,24 @@ const DOM = {
   barDry: document.getElementById('bar-dry'),
   pctWet: document.getElementById('pct-wet'),
   barWet: document.getElementById('bar-wet'),
+  pctBg: document.getElementById('pct-bg'),
+  barBg: document.getElementById('bar-bg'),
 
   // Model Config
   btnToggleConfig: document.getElementById('btn-toggle-config'),
   configBody: document.getElementById('config-body'),
   inputModelUrl: document.getElementById('input-model-url'),
   btnReloadModel: document.getElementById('btn-reload-model'),
+  btnSrcNew3: document.getElementById('btn-src-new3'),
   btnSrcOnline: document.getElementById('btn-src-online'),
   btnSrcLocal: document.getElementById('btn-src-local'),
   rangeThreshold: document.getElementById('range-threshold'),
   rangeThresholdLabel: document.getElementById('range-threshold-label'),
 
-  // Serial Hardware
+  // Serial & WiFi Hardware
+  inputWifiIp: document.getElementById('input-wifi-ip'),
+  btnConnectWifi: document.getElementById('btn-connect-wifi'),
+  btnDisconnectWifi: document.getElementById('btn-disconnect-wifi'),
   btnConnectEsp32: document.getElementById('btn-connect-esp32'),
   btnDisconnectEsp32: document.getElementById('btn-disconnect-esp32'),
   badgeConnectionState: document.getElementById('badge-connection-state'),
@@ -256,12 +265,26 @@ class ModelManager {
   static mapCategory(rawLabel) {
     const clean = String(rawLabel).toLowerCase().trim();
 
-    // Deteksi Sampah Kering (DRY)
-    if (clean.includes("kering") || clean.includes("dry") || clean.includes("anorganik") || clean.includes("kardus") || clean.includes("plastik")) {
+    // Cek background terlebih dahulu
+    if (clean.includes("background") || clean.includes("kosong") || clean.includes("neutral")) {
+      return {
+        type: "BACKGROUND",
+        displayName: "Background (Kosong)",
+        subDesc: "Tidak ada sampah terdeteksi",
+        angle: CONFIG.ANGLES.RESET,
+        command: null,
+        direction: "Netral (90°)",
+        themeClass: "",
+        barClass: ""
+      };
+    }
+
+    // Deteksi Sampah Kering / Anorganic (DRY) -- cek "anorganic" SEBELUM "organic"!
+    if (clean.includes("anorganic") || clean.includes("anorganik") || clean.includes("kering") || clean.includes("dry") || clean.includes("kardus") || clean.includes("plastik")) {
       return {
         type: "DRY",
-        displayName: "Sampah Kering",
-        subDesc: "Kertas, Kardus, Plastik, Daun Kering",
+        displayName: "Sampah Kering (Anorganic)",
+        subDesc: "Kertas, Kardus, Plastik, Kaleng",
         angle: CONFIG.ANGLES.DRY,
         command: "DRY\n",
         direction: "Kiri (30°)",
@@ -270,11 +293,11 @@ class ModelManager {
       };
     }
 
-    // Deteksi Sampah Basah (WET)
-    if (clean.includes("basah") || clean.includes("wet") || clean.includes("organik") || clean.includes("makanan") || clean.includes("buah")) {
+    // Deteksi Sampah Basah / Organic (WET)
+    if (clean.includes("organic") || clean.includes("organik") || clean.includes("basah") || clean.includes("wet") || clean.includes("makanan") || clean.includes("buah")) {
       return {
         type: "WET",
-        displayName: "Sampah Basah",
+        displayName: "Sampah Basah (Organic)",
         subDesc: "Sisa Makanan, Kulit Buah, Sayuran Basah",
         angle: CONFIG.ANGLES.WET,
         command: "WET\n",
@@ -409,6 +432,9 @@ class CameraManager {
       } else if (catInfo.type === "WET") {
         DOM.pctWet.textContent = percentStr;
         DOM.barWet.style.width = percentStr;
+      } else if (catInfo.type === "BACKGROUND" && DOM.pctBg && DOM.barBg) {
+        DOM.pctBg.textContent = percentStr;
+        DOM.barBg.style.width = percentStr;
       }
 
       if (probability > highestProb) {
@@ -510,13 +536,16 @@ async function triggerSortingAction(categoryInfo, confidence) {
   logTerminal(`[AI TRIGGER] ${categoryInfo.displayName} terkonfirmasi stabil! (${confPercent}). Mengirim: ${command.trim()}`, 'sent');
   AudioChime.success();
 
-  // Kirim perintah ke ESP32 melalui Web Serial
+  // Kirim perintah ke ESP32 melalui WiFi HTTP atau Web Serial
   let sendStatus = "Belum Terhubung ESP32";
-  if (AppState.isSerialConnected) {
+  if (AppState.isWifiConnected) {
+    const success = await WifiManager.sendCommand(command.trim());
+    sendStatus = success ? "Terkirim via WiFi" : "Gagal Kirim WiFi";
+  } else if (AppState.isSerialConnected) {
     const success = await SerialManager.write(command);
     sendStatus = success ? "Terkirim ke ESP32" : "Gagal Kirim";
   } else {
-    logTerminal(`ESP32 belum terhubung USB. Simulasi pergerakan servo pada antarmuka.`, 'warn');
+    logTerminal(`ESP32 belum terhubung WiFi/USB. Simulasi pergerakan servo pada antarmuka.`, 'warn');
     sendStatus = "Simulasi UI (Offline ESP32)";
   }
 
@@ -618,6 +647,10 @@ function resetClassificationDisplay() {
   DOM.barDry.style.width = "0%";
   DOM.pctWet.textContent = "0.0%";
   DOM.barWet.style.width = "0%";
+  if (DOM.pctBg && DOM.barBg) {
+    DOM.pctBg.textContent = "0.0%";
+    DOM.barBg.style.width = "0%";
+  }
   DOM.stabilityCount.textContent = "0 / 6 Frame";
   DOM.stabilityBar.style.width = "0%";
   DOM.targetBox.className = "target-box";
@@ -631,6 +664,90 @@ function resetClassificationDisplay() {
 function showToast(text, icon = 'ℹ️') {
   DOM.toastIcon.textContent = icon;
   DOM.toastText.textContent = text;
+}
+
+// ============================================================================
+// WiFi HTTP Manager (Wireless ESP32 Communication)
+// ============================================================================
+class WifiManager {
+  static normalizeBaseUrl(raw) {
+    let url = (raw || "").trim().replace(/\/+$/, "");
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      url = "http://" + url;
+    }
+    return url;
+  }
+
+  static async connect() {
+    const baseUrl = WifiManager.normalizeBaseUrl(DOM.inputWifiIp ? DOM.inputWifiIp.value : AppState.wifiBaseUrl);
+    logTerminal(`Menghubungi ESP32 via WiFi: ${baseUrl}/status ...`, 'info');
+
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 4000);
+      const resp = await fetch(`${baseUrl}/status`, { signal: controller.signal });
+      clearTimeout(t);
+
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+
+      AppState.wifiBaseUrl = baseUrl;
+      AppState.isWifiConnected = true;
+
+      DOM.pillSerial.innerHTML = `
+        <span class="status-dot connected"></span>
+        <span class="status-text">ESP32: WiFi (${data.ip || baseUrl})</span>
+      `;
+      DOM.badgeConnectionState.innerHTML = `
+        <span class="dot-indicator green"></span>
+        <span>Terhubung via WiFi</span>
+      `;
+      DOM.specPortName.textContent = baseUrl;
+      if (DOM.btnConnectWifi) DOM.btnConnectWifi.disabled = true;
+      if (DOM.btnDisconnectWifi) DOM.btnDisconnectWifi.disabled = false;
+
+      logTerminal(`[WiFi] ESP32 terhubung! IP: ${data.ip || baseUrl}, Sudut: ${data.angle}°`, 'recv');
+      AudioChime.neutral();
+      showToast('ESP32 Terhubung via WiFi!', '📶');
+    } catch (err) {
+      AppState.isWifiConnected = false;
+      logTerminal(`[WiFi] Gagal terhubung ke ${baseUrl}: ${err.message}`, 'err');
+      alert(`Gagal terhubung ke ESP32 di ${baseUrl}.\nPastikan:\n1. Laptop/HP terhubung ke WiFi ESP32 (defis_esp).\n2. Firmware esp32_wifi_servo.ino sudah terupload.`);
+    }
+  }
+
+  static disconnect() {
+    AppState.isWifiConnected = false;
+    if (DOM.btnConnectWifi) DOM.btnConnectWifi.disabled = false;
+    if (DOM.btnDisconnectWifi) DOM.btnDisconnectWifi.disabled = true;
+
+    if (!AppState.isSerialConnected) {
+      DOM.pillSerial.innerHTML = `
+        <span class="status-dot disconnected"></span>
+        <span class="status-text">ESP32: Terputus</span>
+      `;
+      DOM.badgeConnectionState.innerHTML = `
+        <span class="dot-indicator red"></span>
+        <span>Belum Terhubung</span>
+      `;
+      DOM.specPortName.textContent = "Tidak aktif";
+    }
+    logTerminal("Koneksi WiFi ESP32 diputus.", 'warn');
+  }
+
+  static async sendCommand(cmd) {
+    if (!AppState.isWifiConnected) return false;
+    const cleanCmd = cmd.trim().toUpperCase();
+    try {
+      const resp = await fetch(`${AppState.wifiBaseUrl}/servo?cmd=${encodeURIComponent(cleanCmd)}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      logTerminal(`[WiFi TX -> ESP32]: ${cleanCmd}`, 'sent');
+      return true;
+    } catch (err) {
+      logTerminal(`[WiFi] Gagal kirim '${cleanCmd}': ${err.message}`, 'err');
+      return false;
+    }
+  }
 }
 
 // ============================================================================
@@ -872,7 +989,10 @@ class ServoController {
     AudioChime.neutral();
 
     let sendStatus = "Belum Terhubung ESP32";
-    if (AppState.isSerialConnected) {
+    if (AppState.isWifiConnected) {
+      const ok = await WifiManager.sendCommand(command.trim());
+      sendStatus = ok ? "Terkirim via WiFi (Manual)" : "Gagal Kirim WiFi";
+    } else if (AppState.isSerialConnected) {
       const ok = await SerialManager.write(command);
       sendStatus = ok ? "Terkirim (Manual)" : "Gagal Kirim";
     } else {
@@ -995,7 +1115,9 @@ function initEventListeners() {
   DOM.btnStartCamera.addEventListener('click', () => CameraManager.start());
   DOM.btnStopCamera.addEventListener('click', () => CameraManager.stop());
 
-  // Serial Connection Buttons
+  // WiFi & Serial Connection Buttons
+  if (DOM.btnConnectWifi) DOM.btnConnectWifi.addEventListener('click', () => WifiManager.connect());
+  if (DOM.btnDisconnectWifi) DOM.btnDisconnectWifi.addEventListener('click', () => WifiManager.disconnect());
   DOM.btnConnectEsp32.addEventListener('click', () => SerialManager.connect());
   DOM.btnDisconnectEsp32.addEventListener('click', () => SerialManager.disconnect());
 
@@ -1038,9 +1160,15 @@ function initEventListeners() {
   });
 
   // Model Source Shortcuts
+  if (DOM.btnSrcNew3) {
+    DOM.btnSrcNew3.addEventListener('click', () => {
+      DOM.inputModelUrl.value = CONFIG.DEFAULT_MODEL_URL;
+      ModelManager.load(CONFIG.DEFAULT_MODEL_URL);
+    });
+  }
   DOM.btnSrcOnline.addEventListener('click', () => {
-    DOM.inputModelUrl.value = CONFIG.DEFAULT_MODEL_URL;
-    ModelManager.load(CONFIG.DEFAULT_MODEL_URL);
+    DOM.inputModelUrl.value = CONFIG.ONLINE_MODEL_URL;
+    ModelManager.load(CONFIG.ONLINE_MODEL_URL);
   });
   DOM.btnSrcLocal.addEventListener('click', () => {
     DOM.inputModelUrl.value = CONFIG.LOCAL_MODEL_URL;
