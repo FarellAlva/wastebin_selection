@@ -153,11 +153,20 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <label class="btn-cam" for="camInput">Ambil Foto Sampah (Kamera)</label>
     <input id="camInput" type="file" accept="image/*" capture="environment">
 
+    <div style="margin-top:10px;display:flex;gap:8px;justify-content:center;align-items:center;flex-wrap:wrap;">
+      <button class="btn-m" id="btnLive" onclick="toggleLive()" style="flex:1;min-width:140px;background:#0f766e;border-color:#14b8a6;">Mode Live (Tiap 3 Detik)</button>
+      <select id="intervalSel" class="btn-m" style="width:auto;">
+        <option value="3000" selected>3 Detik</option>
+        <option value="5000">5 Detik</option>
+      </select>
+    </div>
+
     <div class="preview-wrap">
+      <video id="liveVideo" autoplay playsinline muted style="width:140px;height:140px;object-fit:cover;border-radius:10px;border:2px solid #14b8a6;display:none;"></video>
       <img id="previewOrig" alt="Foto">
       <div>
         <canvas id="canvas96" width="96" height="96"></canvas>
-        <div style="font-size:0.7rem;color:#64748b;margin-top:4px;">Input ESP32 (96x96 Gray)</div>
+        <div style="font-size:0.7rem;color:#64748b;margin-top:4px;">Input Model (96x96)</div>
       </div>
     </div>
 
@@ -182,57 +191,118 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <script>
     const camInput = document.getElementById('camInput');
     const previewOrig = document.getElementById('previewOrig');
+    const liveVideo = document.getElementById('liveVideo');
+    const btnLive = document.getElementById('btnLive');
+    const intervalSel = document.getElementById('intervalSel');
     const canvas = document.getElementById('canvas96');
     const ctx = canvas.getContext('2d');
     const statusText = document.getElementById('statusText');
     const resLabel = document.getElementById('resLabel');
     const resScores = document.getElementById('resScores');
 
+    let liveStream = null;
+    let liveTimer = null;
+    let isSending = false;
+
+    async function sendCanvasToESP32() {
+      if (isSending) return;
+      isSending = true;
+
+      // Preview tetap berwarna di canvas, tapi data yang dikirim ke model tf-lite/ adalah 96x96 grayscale (1 channel)
+      const imgData = ctx.getImageData(0, 0, 96, 96);
+      const d = imgData.data;
+      let hexStr = '';
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+        hexStr += gray.toString(16).padStart(2, '0');
+      }
+
+      statusText.textContent = 'Mengirim ke ESP32 & menjalankan AI...';
+      try {
+        const resp = await fetch('/predict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: hexStr
+        });
+        const data = await resp.json();
+        if (data.error) {
+          statusText.textContent = 'Error: ' + data.error;
+        } else {
+          updateResultUI(data);
+        }
+      } catch (err) {
+        statusText.textContent = 'Gagal terhubung ke ESP32: ' + err.message;
+      } finally {
+        isSending = false;
+      }
+    }
+
+    async function toggleLive() {
+      if (liveTimer) {
+        clearInterval(liveTimer);
+        liveTimer = null;
+        if (liveStream) {
+          liveStream.getTracks().forEach(t => t.stop());
+          liveStream = null;
+        }
+        liveVideo.style.display = 'none';
+        btnLive.textContent = 'Mode Live (Tiap ' + (intervalSel.value / 1000) + ' Detik)';
+        statusText.textContent = 'Mode Live dihentikan.';
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        statusText.innerHTML =
+          'Kamera Live diblokir Chrome/Safari karena alamat masih <b>http://</b> (bukan https).<br>' +
+          '<b>Solusi Android Chrome:</b> Buka tab baru &rarr; ketik <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code> &rarr; isi <code>http://192.168.4.1</code> &rarr; pilih <b>Enabled</b> &rarr; <b>Relaunch</b>.';
+        return;
+      }
+
+      try {
+        liveStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        liveVideo.srcObject = liveStream;
+        liveVideo.style.display = 'block';
+        previewOrig.style.display = 'none';
+        btnLive.textContent = 'Stop Mode Live';
+
+        const ms = parseInt(intervalSel.value, 10);
+        statusText.textContent = 'Mode Live aktif: kirim otomatis tiap ' + (ms / 1000) + ' detik...';
+
+        const captureAndSend = () => {
+          if (!liveVideo.videoWidth || isSending) return;
+          const minSide = Math.min(liveVideo.videoWidth, liveVideo.videoHeight);
+          const sx = (liveVideo.videoWidth - minSide) / 2;
+          const sy = (liveVideo.videoHeight - minSide) / 2;
+          ctx.drawImage(liveVideo, sx, sy, minSide, minSide, 0, 0, 96, 96);
+          sendCanvasToESP32();
+        };
+
+        setTimeout(captureAndSend, 800);
+        liveTimer = setInterval(captureAndSend, ms);
+      } catch (err) {
+        statusText.textContent = 'Kamera Live tidak diizinkan (' + err.message + '). Gunakan tombol Ambil Foto.';
+      }
+    }
+
     camInput.addEventListener('change', (e) => {
       const file = e.target.files[0];
       if (!file) return;
 
-      statusText.textContent = 'Memproses & mengecilkan gambar ke 96x96...';
+      statusText.textContent = 'Memproses gambar ke 96x96...';
       const reader = new FileReader();
       reader.onload = (ev) => {
         const img = new Image();
         img.onload = async () => {
           previewOrig.src = ev.target.result;
           previewOrig.style.display = 'block';
+          liveVideo.style.display = 'none';
 
-          // Center-crop persegi lalu resize ke 96x96
           const minSide = Math.min(img.width, img.height);
           const sx = (img.width - minSide) / 2;
           const sy = (img.height - minSide) / 2;
           ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, 96, 96);
 
-          // Konversi ke 96x96 Grayscale dan encode ke Hex (18.432 char)
-          const imgData = ctx.getImageData(0, 0, 96, 96);
-          const d = imgData.data;
-          let hexStr = '';
-          for (let i = 0; i < d.length; i += 4) {
-            const gray = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
-            d[i] = d[i + 1] = d[i + 2] = gray;
-            hexStr += gray.toString(16).padStart(2, '0');
-          }
-          ctx.putImageData(imgData, 0, 0);
-
-          statusText.textContent = 'Mengirim ke ESP32 & menjalankan AI TFLite...';
-          try {
-            const resp = await fetch('/predict', {
-              method: 'POST',
-              headers: { 'Content-Type': 'text/plain' },
-              body: hexStr
-            });
-            const data = await resp.json();
-            if (data.error) {
-              statusText.textContent = 'Error: ' + data.error;
-              return;
-            }
-            updateResultUI(data);
-          } catch (err) {
-            statusText.textContent = 'Gagal terhubung ke ESP32: ' + err.message;
-          }
+          await sendCanvasToESP32();
         };
         img.src = ev.target.result;
       };
@@ -301,6 +371,8 @@ static inline uint8_t hexVal(char c) {
 }
 
 void handlePredict() {
+  Serial.printf("[HTTP] /predict diterima | Free Heap: %u bytes\n", ESP.getFreeHeap());
+  Serial.flush();
   if (!isModelReady) {
     server.send(500, "application/json", "{\"error\":\"Model TFLite belum siap (RAM tidak cukup)\"}");
     return;
@@ -366,21 +438,23 @@ void handlePredict() {
 
   const char* topLabel = kCategoryLabels[topIdx];
   String actionMsg = "Tidak ada aksi (Background / Confidence di bawah threshold)";
+  int pendingAngle = ANGLE_RESET;
 
   Serial.printf("[AI ESP32] Hasil: %s (%.1f%%) dalam %lu ms\n", topLabel, topScore * 100.0f, elapsed);
 
-  // Gerakkan servo sesuai label di model_settings.cpp: {"background", "organic", "anorganic"}
+  // Tentukan aksi servo sesuai label di model_settings.cpp: {"background", "organic", "anorganic"}
   if (topScore >= CONFIDENCE_THRESHOLD) {
     if (strcmp(topLabel, "anorganic") == 0) {
       actionMsg = "Terdeteksi ANORGANIC (DRY) -> Servo KIRI 30 deg";
-      triggerServo(ANGLE_DRY);
+      pendingAngle = ANGLE_DRY;
     } else if (strcmp(topLabel, "organic") == 0) {
       actionMsg = "Terdeteksi ORGANIC (WET) -> Servo KANAN 150 deg";
-      triggerServo(ANGLE_WET);
+      pendingAngle = ANGLE_WET;
     }
   }
 
-  // Susun JSON response
+  // Susun & KIRIM JSON response DULU sebelum servo bergerak
+  // (Mencegah koneksi WiFi putus/timeout akibat delay atau tarikan arus servo)
   String json = "{";
   json += "\"top_label\":\"" + String(topLabel) + "\",";
   json += "\"top_score\":" + String(topScore, 4) + ",";
@@ -394,27 +468,53 @@ void handlePredict() {
   json += "]}";
 
   server.send(200, "application/json", json);
+  delay(30); // Beri waktu paket TCP WiFi terkirim ke HP sebelum servo menarik arus
+
+  // Baru gerakkan servo setelah hasil terkirim ke HP
+  if (pendingAngle != ANGLE_RESET) {
+    triggerServo(pendingAngle);
+  }
 }
 
 // ============================================================================
 // SETUP & LOOP
 // ============================================================================
 void setup() {
+  disableLoopWDT(); // Cegah reset Watchdog (TWDT 5 detik) saat inferensi TFLite berjalan
   Serial.begin(115200);
-  delay(500);
+  delay(1000);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
   Serial.println("\n==================================================");
   Serial.println("  SMART TRASH ESP32 (ON-EDGE TFLITE + WIFI + SERVO)");
   Serial.println("==================================================");
+  Serial.flush();
 
   // 1. Alokasikan Tensor Arena SEBELUM WiFi aktif (agar dapat blok DRAM kontinyu)
-  Serial.printf("[INFO] Free Heap sebelum alloc: %u bytes\n", ESP.getFreeHeap());
-  tensor_arena = (uint8_t*)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_8BIT);
+  size_t freeHeap = ESP.getFreeHeap();
+  size_t maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[INFO] Free Heap: %u bytes | Max Contiguous Block: %u bytes\n",
+                (unsigned)freeHeap, (unsigned)maxBlock);
+  Serial.flush();
+
+  int allocSize = kTensorArenaSize;
+  if ((size_t)allocSize > maxBlock) {
+    allocSize = (maxBlock > 8192) ? (int)(maxBlock - 4096) : 0;
+    Serial.printf("[WARN] Menyesuaikan tensor_arena ke %d bytes\n", allocSize);
+    Serial.flush();
+  }
+
+  if (allocSize > 0) {
+    tensor_arena = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_8BIT);
+  }
+
   if (!tensor_arena) {
-    Serial.println("[ERROR] Gagal alokasi tensor_arena 136 KB!");
+    Serial.println("[ERROR] Gagal alokasi tensor_arena!");
+    Serial.flush();
   } else {
+    Serial.println("[STEP 1] tensor_arena OK, memuat model TFLite...");
+    Serial.flush();
     static tflite::MicroErrorReporter micro_error_reporter;
     error_reporter = &micro_error_reporter;
 
@@ -422,11 +522,15 @@ void setup() {
     if (model->version() != TFLITE_SCHEMA_VERSION) {
       Serial.println("[ERROR] Versi schema model TFLite tidak cocok!");
     } else {
+      Serial.println("[STEP 2] Menyiapkan OpResolver & Interpreter...");
+      Serial.flush();
       static tflite::ops::micro::AllOpsResolver resolver;
       static tflite::MicroInterpreter static_interpreter(
-          model, resolver, tensor_arena, kTensorArenaSize, error_reporter);
+          model, resolver, tensor_arena, allocSize, error_reporter);
       interpreter = &static_interpreter;
 
+      Serial.println("[STEP 3] Memanggil AllocateTensors()...");
+      Serial.flush();
       if (interpreter->AllocateTensors() != kTfLiteOk) {
         Serial.println("[ERROR] AllocateTensors() gagal!");
       } else {
@@ -436,6 +540,7 @@ void setup() {
         Serial.println("[OK] Model TFLite Micro siap di ESP32!");
       }
     }
+    Serial.flush();
   }
 
   // 2. Inisialisasi Servo + Self-Test (180 -> 0 -> 90)
@@ -472,6 +577,7 @@ void setup() {
   if (WiFi.status() != WL_CONNECTED) {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
+    WiFi.setSleep(false);
     Serial.printf("[OK] Hotspot ESP32 Aktif!\n");
     Serial.printf("     WiFi SSID : %s\n", AP_SSID);
     Serial.printf("     Password  : %s\n", AP_PASSWORD);
